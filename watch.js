@@ -27,6 +27,7 @@ const S = {
   live: false,
   ipSel: null,
   channel: null,
+  sessions: [],
   pending: 0,
   timer: null
 };
@@ -56,6 +57,7 @@ function ago(d) {
   if (s < 7 * 86400) return `${Math.round(s / 86400)}d ago`;
   return fmtDT(d);
 }
+const fmtDate = (d) => new Date(d).toLocaleDateString([], { month: "short", day: "numeric" });
 const fmtDT = (d) => new Date(d).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
 function device(ua) {
@@ -142,10 +144,48 @@ function geoShort(ip) {
 /* ---------------- data ---------------- */
 async function loadRows() {
   const since = new Date(Date.now() - KEEP_DAYS * 864e5).toISOString();
-  const { data, error } = await sb.from("login_log").select("*")
-    .eq("site", SITE.id).gte("at", since).order("at", { ascending: false }).limit(10000);
+  const [{ data, error }, sess] = await Promise.all([
+    sb.from("login_log").select("*").eq("site", SITE.id).gte("at", since).order("at", { ascending: false }).limit(10000),
+    sb.rpc("watch_sessions")
+  ]);
   if (error) throw error;
   S.rows = data || [];
+  S.sessions = (sess && !sess.error && sess.data) || [];
+}
+
+/* ---------------- active devices (Supabase session records) ---------------- */
+function deviceRow(d, { showUser = true } = {}) {
+  const geo = d.ip ? geoShort(d.ip) : "";
+  const sub = [d.ip ? `<span class="mono">${esc(d.ip)}</span>` : "no IP", geo && esc(geo), esc(device(d.user_agent))].filter(Boolean).join(" · ");
+  const attrs = showUser ? `data-go="#/u/${esc(encodeURIComponent(d.username))}"` : `data-ip="${esc(d.ip || "")}"`;
+  const sel = !showUser && d.ip && d.ip === S.ipSel ? "sel" : "";
+  return `<button class="row ${sel}" ${attrs}>
+    <div class="main">
+      <div class="t1">${showUser ? `<span class="who">${esc(d.username)}</span>` : ""}<span class="tag info">Signed in ${esc(fmtDate(d.signed_in))}</span></div>
+      <div class="t2">${sub}</div>
+    </div>
+    <div class="when" title="Last active ${esc(new Date(d.last_active).toLocaleString())}">${ago(d.last_active)}</div>
+  </button>`;
+}
+
+/* ---------------- danger zone (Admin) ---------------- */
+function dangerZone(buttons) {
+  if (!isAdmin()) return "";
+  return `<section class="card danger-zone" style="margin-top:16px">
+    <div class="card-h"><h3>Clean up logs</h3></div>
+    <div class="dz-b">${buttons}</div>
+  </section>`;
+}
+async function purge(opts, confirmText, typeDelete = false) {
+  if (typeDelete) {
+    const t = prompt(`${confirmText}\n\nType DELETE to confirm.`);
+    if ((t || "").trim().toUpperCase() !== "DELETE") { if (t !== null) toast("Nothing deleted", true); return; }
+  } else if (!confirm(confirmText)) return;
+  const { data, error } = await sb.rpc("watch_purge_log", opts);
+  if (error) return toast(errMsg(error), true);
+  toast(`Deleted ${data} log ${data === 1 ? "entry" : "entries"}`);
+  try { await loadRows(); } catch {}
+  render();
 }
 
 function startLive() {
@@ -289,6 +329,7 @@ function renderHome() {
     .sort((a, b) => (a.lastOk < b.lastOk ? 1 : -1));
   const feed = (S.filter === "ok" ? okRows : S.filter === "fail" ? failRows : rows).slice(0, 200);
   const ips = new Set(rows.map((r) => r.ip).filter(Boolean));
+  const devices = S.sessions.filter((d) => Date.now() - new Date(d.last_active) <= RANGES[S.range]);
 
   $("#app").innerHTML = shell(`
     <div class="crumb" style="justify-content:space-between">
@@ -339,13 +380,24 @@ function renderHome() {
             <td class="hide-sm">${esc(r.ip ? geoShort(r.ip) : "")}</td>
             <td class="hide-sm dim">${esc(device(r.user_agent))}</td>
           </tr>`).join("")}</tbody></table></div>` : `<div class="empty">No failed logins 👍</div>`}
-    </section>`);
+    </section>
+    <section class="card" style="margin-top:16px">
+      <div class="card-h"><h3>Active devices</h3><div class="sp"></div><span class="faint">${devices.length}</span></div>
+      <div class="note" style="padding:0 14px;margin-top:10px">Devices still signed in, including installed apps. "Last active" updates when the app is opened, about once an hour at most.</div>
+      <div class="card-b">${devices.length ? devices.slice(0, 150).map((d) => deviceRow(d)).join("") : `<div class="empty">No devices active in this time</div>`}</div>
+    </section>
+    ${dangerZone(`
+      <button class="dz-btn" id="purgeOld">Delete logs older than 90 days</button>
+      <button class="dz-btn bad" id="purgeAll">Delete all logs</button>`)}`);
 
   bindShell();
   bindGo();
   $$("#rangeSeg button").forEach((b) => b.onclick = () => { S.range = b.dataset.r; store.set("watch-range", S.range); render(); });
   $$("#filterSeg button").forEach((b) => b.onclick = () => { S.filter = b.dataset.f; render(); });
-  warmGeo(rows.map((r) => r.ip));
+  const po = $("#purgeOld"), pa = $("#purgeAll");
+  if (po) po.onclick = () => purge({ p_older_than_days: 90 }, "Delete every log entry older than 90 days? This can't be undone.");
+  if (pa) pa.onclick = () => purge({}, "Delete ALL login logs for every member? This can't be undone.", true);
+  warmGeo(rows.map((r) => r.ip).concat(devices.map((d) => d.ip)));
 }
 
 /* ---------------- user ---------------- */
@@ -355,8 +407,10 @@ function renderUser(name) {
   const okN = rows.filter((r) => r.result === "ok").length;
   const failN = rows.length - okN;
   const lastOk = rows.find((r) => r.result === "ok");
-  const display = rows[0] ? rows[0].username : name;
-  if (!S.ipSel || !ips.some((x) => x.ip === S.ipSel)) S.ipSel = ips[0] ? ips[0].ip : null;
+  const devs = S.sessions.filter((d) => key(d.username) === key(name));
+  const display = rows[0] ? rows[0].username : devs[0] ? devs[0].username : name;
+  const allIps = ips.map((x) => x.ip).concat(devs.map((d) => d.ip)).filter(Boolean);
+  if (!S.ipSel || !allIps.includes(S.ipSel)) S.ipSel = (devs[0] && devs[0].ip) || (ips[0] && ips[0].ip) || null;
 
   $("#app").innerHTML = shell(`
     <div class="crumb"><button data-go="#/">← Traffic</button></div>
@@ -370,6 +424,10 @@ function renderUser(name) {
     </div>
     <div class="grid2">
       <div>
+        <section class="card" style="margin-bottom:16px">
+          <div class="card-h"><h3>Devices signed in</h3><div class="sp"></div><span class="faint">${devs.length}</span></div>
+          <div class="card-b">${devs.length ? devs.map((d) => deviceRow(d, { showUser: false })).join("") : `<div class="empty">Not signed in on any device</div>`}</div>
+        </section>
         <section class="card">
           <div class="card-h"><h3>Stored IPs</h3><div class="sp"></div><span class="faint">${ips.length}</span></div>
           <div class="card-b">${ips.length ? ips.map((x) => `
@@ -387,10 +445,13 @@ function renderUser(name) {
         </section>
       </div>
       <div class="sticky">${ipPanelShell(S.ipSel)}</div>
-    </div>`);
+    </div>
+    ${dangerZone(`<button class="dz-btn bad" id="purgeUser">Delete all of ${esc(display)}'s logs</button>`)}`);
 
   bindShell();
   bindGo();
+  const pu = $("#purgeUser");
+  if (pu) pu.onclick = () => purge({ p_username: display }, `Delete all of ${display}'s login logs? This can't be undone. (Their account isn't affected.)`);
   $$("[data-ip]").forEach((b) => b.onclick = () => {
     S.ipSel = b.dataset.ip;
     $$("[data-ip]").forEach((x) => x.classList.toggle("sel", x === b));
@@ -399,7 +460,7 @@ function renderUser(name) {
   });
   bindIpSearch();
   showIp(S.ipSel);
-  warmGeo(ips.map((x) => x.ip));
+  warmGeo(allIps);
 }
 
 /* ---------------- IP page ---------------- */
@@ -457,7 +518,7 @@ async function showIp(ip) {
   const g = await lookupGeo(ip);
   if (S.ipSel !== ip && route().view !== "ip") return; // user picked another IP meanwhile
   const here = S.rows.filter((r) => r.ip === ip);
-  const users = [...new Set(here.map((r) => r.username))];
+  const users = [...new Set(here.map((r) => r.username).concat(S.sessions.filter((d) => d.ip === ip).map((d) => d.username)))];
   const okN = here.filter((r) => r.result === "ok").length;
 
   let geoHtml;
@@ -475,11 +536,11 @@ async function showIp(ip) {
   box.innerHTML = `<div class="geo">
     <div class="ip">${esc(ip)}</div>
     ${geoHtml}
-    ${here.length ? `
+    ${here.length || users.length ? `
       <dl class="kv" style="margin-top:12px">
         <dt>Attempts</dt><dd>${here.length} (${okN} ok, ${here.length - okN} failed)</dd>
-        <dt>First seen</dt><dd>${esc(fmtDT(here[here.length - 1].at))}</dd>
-        <dt>Last seen</dt><dd>${esc(fmtDT(here[0].at))}</dd>
+        ${here.length ? `<dt>First seen</dt><dd>${esc(fmtDT(here[here.length - 1].at))}</dd>
+        <dt>Last seen</dt><dd>${esc(fmtDT(here[0].at))}</dd>` : ""}
       </dl>
       <div class="users-on-ip">${users.map((u) => `<button class="chip" data-go="#/u/${esc(encodeURIComponent(u))}">${esc(u)}</button>`).join("")}</div>
       ${users.length > 1 ? `<div class="note">More than one account has used this IP. That can be normal (same house, school or mobile carrier) or a sign of alt accounts.</div>` : ""}
