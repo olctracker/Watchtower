@@ -194,3 +194,9 @@ tbody tr:hover { background: var(--panel-2); }
 
 .when2 { text-align: right; line-height: 1.25; }
 .when2 span { display: block; font-family: var(--sans); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
+
+/* ---------- app opens / filters ---------- */
+.row.info { border-left-color: var(--accent-2); }
+.seg button { white-space: nowrap; }
+.card-h { flex-wrap: wrap; row-gap: 8px; }
+@media (max-width: 420px) { .seg button { padding: 4px 8px; } }

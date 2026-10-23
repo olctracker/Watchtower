@@ -46,8 +46,11 @@ const RESULT = {
   ok:           { cls: "ok",   label: "Signed in" },
   wrong_pin:    { cls: "warn", label: "Wrong PIN" },
   locked:       { cls: "bad",  label: "Locked out" },
-  unknown_user: { cls: "bad",  label: "Unknown user" }
+  unknown_user: { cls: "bad",  label: "Unknown user" },
+  open:         { cls: "info", label: "Opened app" }
 };
+const FAILS = new Set(["wrong_pin", "locked", "unknown_user"]);
+const isActive = (r) => r.result === "ok" || r.result === "open";
 
 function ago(d) {
   const s = Math.floor((Date.now() - new Date(d)) / 1000);
@@ -78,7 +81,7 @@ function toast(msg, bad = false) {
 }
 
 const inRange = (r) => Date.now() - new Date(r.at) <= RANGES[S.range];
-const isFail = (r) => r.result !== "ok";
+const isFail = (r) => FAILS.has(r.result);
 
 /* ---------------- IP geolocation ---------------- */
 const GEO_KEY = "watch-geo-v1";
@@ -222,9 +225,9 @@ function summarizeUsers(rows) {
   for (const r of rows) {
     const k = key(r.username);
     let u = m.get(k);
-    if (!u) m.set(k, u = { name: r.username, ok: 0, fail: 0, last: r.at, lastOk: null, ips: new Set(), known: r.result !== "unknown_user" });
-    r.result === "ok" ? u.ok++ : u.fail++;
-    if (r.result === "ok" && !u.lastOk) u.lastOk = r.at;
+    if (!u) m.set(k, u = { name: r.username, ok: 0, opens: 0, fail: 0, last: r.at, lastOk: null, ips: new Set(), known: r.result !== "unknown_user" });
+    if (r.result === "ok") u.ok++; else if (r.result === "open") u.opens++; else u.fail++;
+    if (isActive(r) && !u.lastOk) u.lastOk = r.at;
     if (r.ip) u.ips.add(r.ip);
     if (r.result !== "unknown_user") u.known = true;
   }
@@ -237,7 +240,7 @@ function summarizeIps(rows) {
     if (!r.ip) continue;
     let x = m.get(r.ip);
     if (!x) m.set(r.ip, x = { ip: r.ip, ok: 0, fail: 0, first: r.at, last: r.at, users: new Set(), ua: r.user_agent });
-    r.result === "ok" ? x.ok++ : x.fail++;
+    if (r.result === "ok") x.ok++; else if (r.result === "open") x.opens = (x.opens || 0) + 1; else x.fail++;
     if (r.at < x.first) x.first = r.at;
     if (r.at > x.last) x.last = r.at;
     x.users.add(r.username);
@@ -342,7 +345,7 @@ const allKnownIps = () => S.rows.map((r) => r.ip).concat(S.sessions.map((d) => d
 /* ---------------- country-change alerts ---------------- */
 const REVIEWED_KEY = "watch-reviewed-v1";
 const reviewed = new Set(store.get(REVIEWED_KEY, []));
-const KIND_LABEL = { ok: "Signed in", wrong_pin: "Wrong PIN", locked: "Locked out", device: "Device active" };
+const KIND_LABEL = { ok: "Signed in", open: "Opened app", wrong_pin: "Wrong PIN", locked: "Locked out", device: "Device active" };
 const countryName = (g) => `${g.flag ? g.flag + " " : ""}${g.country || g.cc}`;
 
 function computeAlerts() {
@@ -397,10 +400,11 @@ function bindAlerts() {
 function renderHome() {
   const rows = S.rows.filter(inRange);
   const okRows = rows.filter((r) => r.result === "ok");
+  const openRows = rows.filter((r) => r.result === "open");
   const failRows = rows.filter(isFail);
-  const users = summarizeUsers(rows).filter((u) => u.ok > 0)
+  const users = summarizeUsers(rows).filter((u) => u.ok + u.opens > 0)
     .sort((a, b) => (a.lastOk < b.lastOk ? 1 : -1));
-  const feed = (S.filter === "ok" ? okRows : S.filter === "fail" ? failRows : rows).slice(0, 200);
+  const feed = (S.filter === "ok" ? okRows : S.filter === "open" ? openRows : S.filter === "fail" ? failRows : rows).slice(0, 200);
   const ips = new Set(rows.map((r) => r.ip).filter(Boolean));
   const devices = S.sessions.filter((d) => Date.now() - new Date(d.last_active) <= RANGES[S.range]);
 
@@ -413,7 +417,7 @@ function renderHome() {
         `<button data-r="${k}" class="${S.range === k ? "on" : ""}">${k}</button>`).join("")}</div>
     </div>
     <div class="stats">
-      ${stat(users.length, "Members signed in", "good")}
+      ${stat(users.length, "Active members", "good")}
       ${stat(okRows.length, "Sign-ins")}
       ${stat(failRows.length, "Failed attempts", failRows.length ? "warn" : "")}
       ${stat(ips.size, "Different IPs")}
@@ -424,22 +428,23 @@ function renderHome() {
           <div class="seg" id="filterSeg">
             <button data-f="all" class="${S.filter === "all" ? "on" : ""}">All</button>
             <button data-f="ok" class="${S.filter === "ok" ? "on" : ""}">Sign-ins</button>
+            <button data-f="open" class="${S.filter === "open" ? "on" : ""}">Opens</button>
             <button data-f="fail" class="${S.filter === "fail" ? "on" : ""}">Warnings</button>
           </div>
         </div>
         <div class="card-b">${feed.length ? feed.map((r) => eventRow(r)).join("") : `<div class="empty">Nothing here yet</div>`}</div>
       </section>
       <section class="card first-sm">
-        <div class="card-h"><h3>Signed in</h3><div class="sp"></div><span class="faint">${users.length}</span></div>
+        <div class="card-h"><h3>Active members</h3><div class="sp"></div><span class="faint">${users.length}</span></div>
         <div class="card-b">${users.length ? users.map((u) => `
           <button class="row" data-go="#/u/${esc(encodeURIComponent(u.name))}">
             <div class="avatar">${esc(u.name.slice(0, 2).toUpperCase())}</div>
             <div class="main">
               <div class="t1"><span class="who">${esc(u.name)}</span>${u.fail ? `<span class="tag warn">${u.fail} failed</span>` : ""}</div>
-              <div class="t2">${u.ok} sign-in${u.ok === 1 ? "" : "s"} · ${u.ips.size} IP${u.ips.size === 1 ? "" : "s"}</div>
+              <div class="t2">${[u.ok ? `${u.ok} sign-in${u.ok === 1 ? "" : "s"}` : "", u.opens ? `${u.opens} open${u.opens === 1 ? "" : "s"}` : "", `${u.ips.size} IP${u.ips.size === 1 ? "" : "s"}`].filter(Boolean).join(" · ")}</div>
             </div>
             <div class="when">${ago(u.lastOk)}</div>
-          </button>`).join("") : `<div class="empty">No one has signed in during this time</div>`}</div>
+          </button>`).join("") : `<div class="empty">No one has been active during this time</div>`}</div>
       </section>
     </div>
     <section class="card" style="margin-top:16px">
@@ -462,6 +467,7 @@ function renderHome() {
       <div class="card-b">${devices.length ? devices.slice(0, 150).map((d) => deviceRow(d)).join("") : `<div class="empty">No devices active in this time</div>`}</div>
     </section>
     ${dangerZone(`
+      <button class="dz-btn" id="purge30">Delete logs older than 30 days</button>
       <button class="dz-btn" id="purgeOld">Delete logs older than 90 days</button>
       <button class="dz-btn bad" id="purgeAll">Delete all logs</button>`)}`);
 
@@ -469,7 +475,8 @@ function renderHome() {
   bindGo();
   $$("#rangeSeg button").forEach((b) => b.onclick = () => { S.range = b.dataset.r; store.set("watch-range", S.range); render(); });
   $$("#filterSeg button").forEach((b) => b.onclick = () => { S.filter = b.dataset.f; render(); });
-  const po = $("#purgeOld"), pa = $("#purgeAll");
+  const p30 = $("#purge30"), po = $("#purgeOld"), pa = $("#purgeAll");
+  if (p30) p30.onclick = () => purge({ p_older_than_days: 30 }, "Delete every log entry older than 30 days? This can't be undone.");
   if (po) po.onclick = () => purge({ p_older_than_days: 90 }, "Delete every log entry older than 90 days? This can't be undone.");
   if (pa) pa.onclick = () => purge({}, "Delete ALL login logs for every member? This can't be undone.", true);
   bindAlerts();
@@ -481,8 +488,9 @@ function renderUser(name) {
   const rows = S.rows.filter((r) => key(r.username) === key(name));
   const ips = summarizeIps(rows);
   const okN = rows.filter((r) => r.result === "ok").length;
-  const failN = rows.length - okN;
-  const lastOk = rows.find((r) => r.result === "ok");
+  const failN = rows.filter(isFail).length;
+  const lastOk = rows.find(isActive);
+  const opensN = rows.filter((r) => r.result === "open").length;
   const devs = S.sessions.filter((d) => key(d.username) === key(name));
   const display = rows[0] ? rows[0].username : devs[0] ? devs[0].username : name;
   const allIps = ips.map((x) => x.ip).concat(devs.map((d) => d.ip)).filter(Boolean);
@@ -492,9 +500,9 @@ function renderUser(name) {
     <div class="crumb"><button data-go="#/">← Traffic</button></div>
     ${alertsCard(ALERTS_NOW.filter((a) => key(a.user) === key(name)), { title: "Location alerts for this member" })}
     <h2>${esc(display)}</h2>
-    <p class="dim" style="margin:0 0 14px">${lastOk ? `Last signed in ${ago(lastOk.at)}` : "No successful sign-ins recorded"} · last ${KEEP_DAYS} days</p>
+    <p class="dim" style="margin:0 0 14px">${lastOk ? `Last active ${ago(lastOk.at)}` : "No activity recorded"} · last ${KEEP_DAYS} days</p>
     <div class="stats">
-      ${stat(okN, "Sign-ins", "good")}
+      ${stat(okN + opensN, "Sign-ins & opens", "good")}
       ${stat(failN, "Failed attempts", failN ? "warn" : "")}
       ${stat(ips.length, "IPs used")}
       ${stat(new Set(ips.map((x) => (geoCache[x.ip] && geoCache[x.ip].g.cc) || null).filter(Boolean)).size || "—", "Countries")}
@@ -511,7 +519,7 @@ function renderUser(name) {
             <button class="row ${x.ip === S.ipSel ? "sel" : ""}" data-ip="${esc(x.ip)}">
               <div class="main">
                 <div class="t1"><span class="who mono">${esc(x.ip)}</span>${x.fail ? `<span class="tag warn">${x.fail} failed</span>` : ""}${x.users.size > 1 ? `<span class="tag info">shared</span>` : ""}</div>
-                <div class="t2">${esc(geoShort(x.ip) || "…")} · ${x.ok} sign-in${x.ok === 1 ? "" : "s"} · first ${esc(fmtDT(x.first))}</div>
+                <div class="t2">${esc(geoShort(x.ip) || "…")} · ${x.ok} sign-in${x.ok === 1 ? "" : "s"}${x.opens ? ` · ${x.opens} open${x.opens === 1 ? "" : "s"}` : ""} · first ${esc(fmtDT(x.first))}</div>
               </div>
               <div class="when">${ago(x.last)}</div>
             </button>`).join("") : `<div class="empty">No IPs recorded</div>`}</div>
@@ -597,7 +605,7 @@ async function showIp(ip) {
   if (S.ipSel !== ip && route().view !== "ip") return; // user picked another IP meanwhile
   const here = S.rows.filter((r) => r.ip === ip);
   const users = [...new Set(here.map((r) => r.username).concat(S.sessions.filter((d) => d.ip === ip).map((d) => d.username)))];
-  const okN = here.filter((r) => r.result === "ok").length;
+  const okN = here.filter(isActive).length;
 
   let geoHtml;
   if (!g) geoHtml = `<div class="place dim">Location unavailable</div><div class="note">The lookup service didn't answer. Try again in a bit.</div>`;
@@ -616,7 +624,7 @@ async function showIp(ip) {
     ${geoHtml}
     ${here.length || users.length ? `
       <dl class="kv" style="margin-top:12px">
-        <dt>Attempts</dt><dd>${here.length} (${okN} ok, ${here.length - okN} failed)</dd>
+        <dt>Activity</dt><dd>${here.length} (${okN} ok, ${here.length - okN} failed)</dd>
         ${here.length ? `<dt>First seen</dt><dd>${esc(fmtDT(here[here.length - 1].at))}</dd>
         <dt>Last seen</dt><dd>${esc(fmtDT(here[0].at))}</dd>` : ""}
       </dl>
