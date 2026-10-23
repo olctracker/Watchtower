@@ -161,10 +161,10 @@ function deviceRow(d, { showUser = true } = {}) {
   const sel = !showUser && d.ip && d.ip === S.ipSel ? "sel" : "";
   return `<button class="row ${sel}" ${attrs}>
     <div class="main">
-      <div class="t1">${showUser ? `<span class="who">${esc(d.username)}</span>` : ""}<span class="tag info">Signed in ${esc(fmtDate(d.signed_in))}</span></div>
+      <div class="t1">${showUser ? `<span class="who">${esc(d.username)}</span>` : ""}<span class="tag info">Signed in since ${esc(fmtDate(d.signed_in))}</span></div>
       <div class="t2">${sub}</div>
     </div>
-    <div class="when" title="Last active ${esc(new Date(d.last_active).toLocaleString())}">${ago(d.last_active)}</div>
+    <div class="when when2" title="Last used ${esc(new Date(d.last_active).toLocaleString())}"><span>last used</span>${ago(d.last_active)}</div>
   </button>`;
 }
 
@@ -458,7 +458,7 @@ function renderHome() {
     </section>
     <section class="card" style="margin-top:16px">
       <div class="card-h"><h3>Active devices</h3><div class="sp"></div><span class="faint">${devices.length}</span></div>
-      <div class="note" style="padding:0 14px;margin-top:10px">Devices still signed in, including installed apps. "Last active" updates when the app is opened, about once an hour at most.</div>
+      <div class="note" style="padding:0 14px;margin-top:10px">Devices still signed in, including installed apps. "Last used" updates when the app is opened, about once an hour at most.</div>
       <div class="card-b">${devices.length ? devices.slice(0, 150).map((d) => deviceRow(d)).join("") : `<div class="empty">No devices active in this time</div>`}</div>
     </section>
     ${dangerZone(`

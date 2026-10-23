@@ -191,3 +191,6 @@ tbody tr:hover { background: var(--panel-2); }
 /* ---------- alerts ---------- */
 .alert-card { border-color: rgba(255, 92, 108, .5); box-shadow: 0 0 0 1px rgba(255, 92, 108, .15), 0 0 24px rgba(255, 92, 108, .08); }
 .alert-card .card-h h3 { color: var(--danger); }
+
+.when2 { text-align: right; line-height: 1.25; }
+.when2 span { display: block; font-family: var(--sans); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); }
