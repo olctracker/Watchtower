@@ -157,6 +157,20 @@ async function loadRows() {
 }
 
 /* ---------------- active devices (Supabase session records) ---------------- */
+// A member can have more than one sign-in on the same phone (e.g. Safari and the
+// home-screen app). Show those as one row: earliest sign-in, latest use.
+function groupDevices(list) {
+  const m = new Map();
+  for (const d of list) {
+    const k = `${key(d.username)}|${d.ip || ""}|${device(d.user_agent)}`;
+    const g = m.get(k);
+    if (!g) { m.set(k, { ...d, count: 1 }); continue; }
+    g.count++;
+    if (d.signed_in < g.signed_in) g.signed_in = d.signed_in;
+    if (d.last_active > g.last_active) g.last_active = d.last_active;
+  }
+  return [...m.values()].sort((a, b) => (a.last_active < b.last_active ? 1 : -1));
+}
 function deviceRow(d, { showUser = true } = {}) {
   const geo = d.ip ? geoShort(d.ip) : "";
   const sub = [d.ip ? `<span class="mono">${esc(d.ip)}</span>` : "no IP", geo && esc(geo), esc(device(d.user_agent))].filter(Boolean).join(" · ");
@@ -164,7 +178,7 @@ function deviceRow(d, { showUser = true } = {}) {
   const sel = !showUser && d.ip && d.ip === S.ipSel ? "sel" : "";
   return `<button class="row ${sel}" ${attrs}>
     <div class="main">
-      <div class="t1">${showUser ? `<span class="who">${esc(d.username)}</span>` : ""}<span class="tag info">Signed in since ${esc(fmtDate(d.signed_in))}</span></div>
+      <div class="t1">${showUser ? `<span class="who">${esc(d.username)}</span>` : ""}<span class="tag info">Signed in since ${esc(fmtDate(d.signed_in))}</span>${d.count > 1 ? `<span class="tag" style="background:var(--panel-2);color:var(--dim)" title="Signed in ${d.count} separate times on this device, e.g. in the browser and the installed app">×${d.count}</span>` : ""}</div>
       <div class="t2">${sub}</div>
     </div>
     <div class="when when2" title="Last used ${esc(new Date(d.last_active).toLocaleString())}"><span>last used</span>${ago(d.last_active)}</div>
@@ -406,7 +420,7 @@ function renderHome() {
     .sort((a, b) => (a.lastOk < b.lastOk ? 1 : -1));
   const feed = (S.filter === "ok" ? okRows : S.filter === "open" ? openRows : S.filter === "fail" ? failRows : rows).slice(0, 200);
   const ips = new Set(rows.map((r) => r.ip).filter(Boolean));
-  const devices = S.sessions.filter((d) => Date.now() - new Date(d.last_active) <= RANGES[S.range]);
+  const devices = groupDevices(S.sessions.filter((d) => Date.now() - new Date(d.last_active) <= RANGES[S.range]));
 
   const alerts = computeAlerts();
   $("#app").innerHTML = shell(`
@@ -491,7 +505,7 @@ function renderUser(name) {
   const failN = rows.filter(isFail).length;
   const lastOk = rows.find(isActive);
   const opensN = rows.filter((r) => r.result === "open").length;
-  const devs = S.sessions.filter((d) => key(d.username) === key(name));
+  const devs = groupDevices(S.sessions.filter((d) => key(d.username) === key(name)));
   const display = rows[0] ? rows[0].username : devs[0] ? devs[0].username : name;
   const allIps = ips.map((x) => x.ip).concat(devs.map((d) => d.ip)).filter(Boolean);
   if (!S.ipSel || !allIps.includes(S.ipSel)) S.ipSel = (devs[0] && devs[0].ip) || (ips[0] && ips[0].ip) || null;
