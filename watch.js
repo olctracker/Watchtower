@@ -199,6 +199,12 @@ function startLive() {
       S.newIds.add(r.id);
       if (isFail(r)) toast(`${RESULT[r.result].label}: ${r.username}`, r.result !== "wrong_pin");
       render();
+      if (r.ip) lookupGeo(r.ip).then(() => {
+        const before = ALERTS_NOW.length;
+        render();
+        const a = ALERTS_NOW.find((x) => key(x.user) === key(r.username) && x.ip === r.ip);
+        if (a && ALERTS_NOW.length > before) toast(`⚠ ${r.username}: new country, ${countryName(a.to)}`, true);
+      });
     })
     .on("postgres_changes", { event: "*", schema: "public", table: "watch_users" }, () => {
       refreshPending();
@@ -281,6 +287,7 @@ function bindShell() {
 
 function render() {
   if (!S.profile) return;
+  ALERTS_NOW = computeAlerts();
   const r = route();
   if (r.view === "accounts") { renderAccounts(); return; }
   if (r.view === "user") renderUser(r.name);
@@ -290,14 +297,16 @@ function render() {
 }
 
 /* ---------------- shared pieces ---------------- */
+let ALERTS_NOW = [];
 function eventRow(r, { showUser = true, noLink = false } = {}) {
   const t = RESULT[r.result] || { cls: "info", label: r.result };
+  const newC = r.ip && isAlertEvent(ALERTS_NOW, r.username, r.ip);
   const geo = r.ip ? geoShort(r.ip) : "";
   const sub = [r.ip ? `<span class="mono">${esc(r.ip)}</span>` : "no IP", geo && esc(geo), esc(device(r.user_agent))].filter(Boolean).join(" · ");
   const target = noLink ? "" : showUser ? `#/u/${encodeURIComponent(r.username)}` : (r.ip ? `#/ip/${encodeURIComponent(r.ip)}` : "");
   return `<button class="row ${t.cls} ${S.newIds.has(r.id) ? "new" : ""}" data-go="${esc(target)}">
     <div class="main">
-      <div class="t1">${showUser ? `<span class="who">${esc(r.username)}</span>` : ""}<span class="tag ${t.cls}">${t.label}</span></div>
+      <div class="t1">${showUser ? `<span class="who">${esc(r.username)}</span>` : ""}<span class="tag ${t.cls}">${t.label}</span>${newC ? `<span class="tag bad">New country</span>` : ""}</div>
       <div class="t2">${sub}</div>
     </div>
     <div class="when" title="${esc(new Date(r.at).toLocaleString())}">${ago(r.at)}</div>
@@ -312,12 +321,76 @@ function bindGo(root = document) {
 
 function stat(n, l, cls = "") { return `<div class="stat ${cls}"><div class="n">${n}</div><div class="l">${l}</div></div>`; }
 
+let geoBusy = false;
 function warmGeo(ips) {
-  // look up locations in the background, then refresh the view once
-  const need = [...new Set(ips)].filter((ip) => ip && !geoCache[ip] && !geoTried.has(ip) && !isPrivateIp(ip)).slice(0, 25);
-  if (!need.length) return;
-  need.forEach((ip) => geoTried.add(ip));
-  Promise.all(need.map((ip) => lookupGeo(ip))).then(() => render());
+  // look up locations in the background (5 at a time), then refresh the view once
+  if (geoBusy) return;
+  const need = [...new Set(ips)].filter((ip) => ip && !geoCache[ip] && !geoTried.has(ip) && !isPrivateIp(ip));
+  const budget = Math.max(0, 400 - geoTried.size);   // stay well inside the free lookup limits
+  const batch = need.slice(0, budget);
+  if (!batch.length) return;
+  geoBusy = true;
+  batch.forEach((ip) => geoTried.add(ip));
+  (async () => {
+    for (let i = 0; i < batch.length; i += 5) await Promise.all(batch.slice(i, i + 5).map((ip) => lookupGeo(ip)));
+    geoBusy = false;
+    render();
+  })();
+}
+const allKnownIps = () => S.rows.map((r) => r.ip).concat(S.sessions.map((d) => d.ip)).filter(Boolean);
+
+/* ---------------- country-change alerts ---------------- */
+const REVIEWED_KEY = "watch-reviewed-v1";
+const reviewed = new Set(store.get(REVIEWED_KEY, []));
+const KIND_LABEL = { ok: "Signed in", wrong_pin: "Wrong PIN", locked: "Locked out", device: "Device active" };
+const countryName = (g) => `${g.flag ? g.flag + " " : ""}${g.country || g.cc}`;
+
+function computeAlerts() {
+  // a member's "usual" countries are the ones seen before; anything new after that is an alert
+  const ev = [];
+  for (const r of S.rows) if (r.ip && r.result !== "unknown_user") ev.push({ u: key(r.username), name: r.username, ip: r.ip, at: r.at, kind: r.result });
+  for (const d of S.sessions) if (d.ip) ev.push({ u: key(d.username), name: d.username, ip: d.ip, at: d.last_active, kind: "device" });
+  ev.sort((a, b) => (a.at < b.at ? -1 : 1));
+  const seen = new Map(), out = new Map();
+  for (const e of ev) {
+    const c = geoCache[e.ip]; const g = c && c.g;
+    if (!g || g.private || !g.cc) continue;
+    let st = seen.get(e.u);
+    if (!st) { seen.set(e.u, st = { set: new Set(), last: null }); }
+    if (st.set.size && !st.set.has(g.cc)) {
+      const id = `${e.u}|${g.cc}`;
+      if (!out.has(id)) out.set(id, { id, user: e.name, ip: e.ip, at: e.at, kind: e.kind, to: g, from: st.last, usual: [...st.set] });
+    }
+    st.set.add(g.cc); st.last = g;
+  }
+  return [...out.values()].sort((a, b) => (a.at < b.at ? 1 : -1));
+}
+const isAlertEvent = (alerts, user, ip) => alerts.some((a) => key(a.user) === key(user) && a.ip === ip);
+
+function alertsCard(alerts, { title = "Location alerts" } = {}) {
+  const open = alerts.filter((a) => !reviewed.has(a.id));
+  if (!open.length) return "";
+  return `<section class="card alert-card" style="margin-bottom:16px">
+    <div class="card-h"><h3>⚠ ${title}</h3><div class="sp"></div><span class="tag bad">${open.length}</span></div>
+    <div class="card-b">${open.map((a) => `
+      <div class="row bad" style="cursor:default">
+        <div class="main">
+          <div class="t1"><span class="who">${esc(a.user)}</span><span class="tag bad">New country</span></div>
+          <div class="t2" style="white-space:normal">${esc(countryName(a.to))}${a.from ? ` · usually ${esc(countryName(a.from))}` : ""}</div>
+          <div class="t2"><span class="mono">${esc(a.ip)}</span> · ${KIND_LABEL[a.kind] || esc(a.kind)} · ${esc(fmtDT(a.at))}</div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <button class="icon-btn" data-go="#/u/${esc(encodeURIComponent(a.user))}">Review</button>
+          <button class="icon-btn" data-ok="${esc(a.id)}" title="Mark as reviewed">✓ OK</button>
+        </div>
+      </div>`).join("")}</div>
+    <div class="note" style="padding:0 14px 12px">VPNs, travel and some mobile carriers can also cause this. "OK" hides an alert on this device.</div>
+  </section>`;
+}
+function bindAlerts() {
+  $$("[data-ok]").forEach((b) => b.onclick = () => {
+    reviewed.add(b.dataset.ok); store.set(REVIEWED_KEY, [...reviewed]); render();
+  });
 }
 
 /* ---------------- home ---------------- */
@@ -331,7 +404,9 @@ function renderHome() {
   const ips = new Set(rows.map((r) => r.ip).filter(Boolean));
   const devices = S.sessions.filter((d) => Date.now() - new Date(d.last_active) <= RANGES[S.range]);
 
+  const alerts = computeAlerts();
   $("#app").innerHTML = shell(`
+    ${alertsCard(alerts)}
     <div class="crumb" style="justify-content:space-between">
       <span>Showing the ${RANGE_LABEL[S.range]}</span>
       <div class="seg" id="rangeSeg">${Object.keys(RANGES).map((k) =>
@@ -397,7 +472,8 @@ function renderHome() {
   const po = $("#purgeOld"), pa = $("#purgeAll");
   if (po) po.onclick = () => purge({ p_older_than_days: 90 }, "Delete every log entry older than 90 days? This can't be undone.");
   if (pa) pa.onclick = () => purge({}, "Delete ALL login logs for every member? This can't be undone.", true);
-  warmGeo(rows.map((r) => r.ip).concat(devices.map((d) => d.ip)));
+  bindAlerts();
+  warmGeo(allKnownIps());
 }
 
 /* ---------------- user ---------------- */
@@ -414,6 +490,7 @@ function renderUser(name) {
 
   $("#app").innerHTML = shell(`
     <div class="crumb"><button data-go="#/">← Traffic</button></div>
+    ${alertsCard(ALERTS_NOW.filter((a) => key(a.user) === key(name)), { title: "Location alerts for this member" })}
     <h2>${esc(display)}</h2>
     <p class="dim" style="margin:0 0 14px">${lastOk ? `Last signed in ${ago(lastOk.at)}` : "No successful sign-ins recorded"} · last ${KEEP_DAYS} days</p>
     <div class="stats">
@@ -450,6 +527,7 @@ function renderUser(name) {
 
   bindShell();
   bindGo();
+  bindAlerts();
   const pu = $("#purgeUser");
   if (pu) pu.onclick = () => purge({ p_username: display }, `Delete all of ${display}'s login logs? This can't be undone. (Their account isn't affected.)`);
   $$("[data-ip]").forEach((b) => b.onclick = () => {
@@ -460,7 +538,7 @@ function renderUser(name) {
   });
   bindIpSearch();
   showIp(S.ipSel);
-  warmGeo(allIps);
+  warmGeo(allKnownIps());
 }
 
 /* ---------------- IP page ---------------- */

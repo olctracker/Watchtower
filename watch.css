@@ -187,3 +187,7 @@ tbody tr:hover { background: var(--panel-2); }
 }
 .dz-btn.bad { background: var(--danger-soft); color: var(--danger); border-color: rgba(255, 92, 108, .45); }
 .dz-btn:hover { filter: brightness(1.15); }
+
+/* ---------- alerts ---------- */
+.alert-card { border-color: rgba(255, 92, 108, .5); box-shadow: 0 0 0 1px rgba(255, 92, 108, .15), 0 0 24px rgba(255, 92, 108, .08); }
+.alert-card .card-h h3 { color: var(--danger); }

@@ -3,7 +3,7 @@
 // To watch another site later, add another entry to `sites` (its Supabase
 // project needs the same setup.sql run on it).
 window.WATCH_CONFIG = {
-  version: "1.1.0",
+  version: "1.2.0",
   sites: [
     {
       id: "olc",
